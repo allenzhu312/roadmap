@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { CSSProperties } from "react";
 
 type Tier = "重点推进" | "持续积累" | "灵活安排";
 
@@ -43,9 +44,18 @@ type DragState = {
   trackWidth: number;
 };
 
+type ColumnResizeState = {
+  startX: number;
+  originalWidth: number;
+};
+
 const TASK_STORAGE_KEY = "roadmap-studio-tasks-v2";
 const RANGE_STORAGE_KEY = "roadmap-studio-range-v1";
+const LABEL_WIDTH_STORAGE_KEY = "roadmap-studio-label-width-v1";
 const DEFAULT_RANGE: RoadmapRange = { start: "2026-08-01", end: "2027-08-31" };
+const DEFAULT_LABEL_WIDTH = 250;
+const MIN_LABEL_WIDTH = 185;
+const MAX_LABEL_WIDTH = 680;
 const TIERS: Tier[] = ["重点推进", "持续积累", "灵活安排"];
 
 const TIER_META: Record<Tier, { eyebrow: string; description: string }> = {
@@ -54,7 +64,19 @@ const TIER_META: Record<Tier, { eyebrow: string; description: string }> = {
   灵活安排: { eyebrow: "PRIORITY 03", description: "机动事项 · 按需调整" },
 };
 
-const COLORS = ["#1d6b52", "#315ea8", "#7656a8", "#c96d45", "#b48a2c"];
+const TIER_DEFAULT_COLOR: Record<Tier, string> = {
+  重点推进: "#d35f3f",
+  持续积累: "#315ea8",
+  灵活安排: "#7656a8",
+};
+
+const COLORS = [
+  TIER_DEFAULT_COLOR.重点推进,
+  TIER_DEFAULT_COLOR.持续积累,
+  TIER_DEFAULT_COLOR.灵活安排,
+  "#1d6b52",
+  "#b48a2c",
+];
 
 const SAMPLE_TASKS: Task[] = [
   {
@@ -64,7 +86,7 @@ const SAMPLE_TASKS: Task[] = [
     start: "2026-08-15",
     end: "2026-11-20",
     tier: "重点推进",
-    color: COLORS[0],
+    color: TIER_DEFAULT_COLOR.重点推进,
   },
   {
     id: "sample-longterm",
@@ -73,7 +95,7 @@ const SAMPLE_TASKS: Task[] = [
     start: "2026-10-05",
     end: "2027-05-25",
     tier: "持续积累",
-    color: COLORS[1],
+    color: TIER_DEFAULT_COLOR.持续积累,
   },
   {
     id: "sample-flex",
@@ -82,7 +104,7 @@ const SAMPLE_TASKS: Task[] = [
     start: "2027-03-10",
     end: "2027-04-20",
     tier: "灵活安排",
-    color: COLORS[2],
+    color: TIER_DEFAULT_COLOR.灵活安排,
   },
 ];
 
@@ -112,6 +134,10 @@ function diffDays(start: string, end: string) {
 
 function clampDate(value: string, min: string, max: string) {
   return value < min ? min : value > max ? max : value;
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function formatDate(value: string) {
@@ -167,7 +193,7 @@ function createBlankTask(rangeStart: string, rangeEnd: string): Task {
     start: rangeStart,
     end: addDays(rangeStart, Math.min(30, diffDays(rangeStart, rangeEnd))),
     tier: "重点推进",
-    color: COLORS[0],
+    color: TIER_DEFAULT_COLOR.重点推进,
   };
 }
 
@@ -212,6 +238,15 @@ function fitTasksToRange(tasks: Task[], rangeStart: string, rangeEnd: string) {
   });
 }
 
+function migrateSampleColors(tasks: Task[]) {
+  return tasks.map((task) => {
+    if (task.id === "sample-focus" && task.tier === "重点推进" && task.color === "#1d6b52") {
+      return { ...task, color: TIER_DEFAULT_COLOR.重点推进 };
+    }
+    return task;
+  });
+}
+
 function isTaskArray(value: unknown): value is Task[] {
   return (
     Array.isArray(value) &&
@@ -228,26 +263,79 @@ function isTaskArray(value: unknown): value is Task[] {
   );
 }
 
+function wrapCanvasText(context: CanvasRenderingContext2D, text: string, maxWidth: number) {
+  const content = text.trim();
+  if (!content) return [];
+  const lines: string[] = [];
+  let line = "";
+  for (const character of Array.from(content)) {
+    const candidate = `${line}${character}`;
+    if (line && context.measureText(candidate).width > maxWidth) {
+      lines.push(line);
+      line = character;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function fitCanvasText(context: CanvasRenderingContext2D, text: string, maxWidth: number) {
+  if (context.measureText(text).width <= maxWidth) return text;
+  let result = text;
+  while (result.length && context.measureText(`${result}…`).width > maxWidth) result = result.slice(0, -1);
+  return `${result}…`;
+}
+
+function roundedCanvasRect(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) {
+  const safeRadius = Math.min(radius, width / 2, height / 2);
+  context.beginPath();
+  context.moveTo(x + safeRadius, y);
+  context.arcTo(x + width, y, x + width, y + height, safeRadius);
+  context.arcTo(x + width, y + height, x, y + height, safeRadius);
+  context.arcTo(x, y + height, x, y, safeRadius);
+  context.arcTo(x, y, x + width, y, safeRadius);
+  context.closePath();
+}
+
 export default function Home() {
   const [tasks, setTasks] = useState<Task[]>(SAMPLE_TASKS);
   const [timelineStart, setTimelineStart] = useState(DEFAULT_RANGE.start);
   const [timelineEnd, setTimelineEnd] = useState(DEFAULT_RANGE.end);
   const [rangeDraft, setRangeDraft] = useState<RoadmapRange | null>(null);
+  const [labelWidth, setLabelWidth] = useState(DEFAULT_LABEL_WIDTH);
   const [ready, setReady] = useState(false);
   const [filter, setFilter] = useState<"全部" | Tier>("全部");
   const [editing, setEditing] = useState<Task | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Task | null>(null);
   const [notice, setNotice] = useState("");
   const [drag, setDrag] = useState<DragState | null>(null);
+  const [columnResize, setColumnResize] = useState<ColumnResizeState | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const months = useMemo(() => monthSegments(timelineStart, timelineEnd), [timelineEnd, timelineStart]);
-  const boardMinWidth = Math.max(1060, 250 + months.length * 72);
+  const boardMinWidth = Math.max(1060, labelWidth + months.length * 72);
+  const boardStyle = {
+    minWidth: `${boardMinWidth}px`,
+    "--label-width": `${labelWidth}px`,
+  } as CSSProperties;
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       try {
         const savedTasks = localStorage.getItem(TASK_STORAGE_KEY);
         const savedRange = localStorage.getItem(RANGE_STORAGE_KEY);
+        const savedLabelWidth = Number(localStorage.getItem(LABEL_WIDTH_STORAGE_KEY));
+        if (Number.isFinite(savedLabelWidth) && savedLabelWidth > 0) {
+          setLabelWidth(clampNumber(savedLabelWidth, MIN_LABEL_WIDTH, MAX_LABEL_WIDTH));
+        }
         let activeRange = DEFAULT_RANGE;
         if (savedRange) {
           const parsedRange: unknown = JSON.parse(savedRange);
@@ -259,7 +347,9 @@ export default function Home() {
         }
         if (savedTasks) {
           const parsed: unknown = JSON.parse(savedTasks);
-          if (isTaskArray(parsed)) setTasks(fitTasksToRange(parsed, activeRange.start, activeRange.end));
+          if (isTaskArray(parsed)) {
+            setTasks(migrateSampleColors(fitTasksToRange(parsed, activeRange.start, activeRange.end)));
+          }
         }
       } catch {
         setNotice("本地数据未能读取，已显示示例计划。");
@@ -273,8 +363,9 @@ export default function Home() {
     if (ready) {
       localStorage.setItem(TASK_STORAGE_KEY, JSON.stringify(tasks));
       localStorage.setItem(RANGE_STORAGE_KEY, JSON.stringify({ start: timelineStart, end: timelineEnd }));
+      localStorage.setItem(LABEL_WIDTH_STORAGE_KEY, String(labelWidth));
     }
-  }, [tasks, timelineEnd, timelineStart, ready]);
+  }, [labelWidth, tasks, timelineEnd, timelineStart, ready]);
 
   useEffect(() => {
     if (!notice) return;
@@ -320,6 +411,22 @@ export default function Home() {
     };
   }, [drag, timelineEnd, timelineStart]);
 
+  useEffect(() => {
+    if (!columnResize) return;
+    const handleMove = (event: PointerEvent) => {
+      setLabelWidth(
+        clampNumber(columnResize.originalWidth + event.clientX - columnResize.startX, MIN_LABEL_WIDTH, MAX_LABEL_WIDTH),
+      );
+    };
+    const handleUp = () => setColumnResize(null);
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+    };
+  }, [columnResize]);
+
   const visibleTasks = useMemo(
     () => tasks.filter((task) => filter === "全部" || task.tier === filter),
     [filter, tasks],
@@ -363,6 +470,15 @@ export default function Home() {
     setTasks((current) => current.map((item) => (item.id === task.id ? { ...item, start, end } : item)));
   };
 
+  const resizeColumnByKeyboard = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const step = event.shiftKey ? 40 : 10;
+    setLabelWidth((current) =>
+      clampNumber(current + (event.key === "ArrowLeft" ? -step : step), MIN_LABEL_WIDTH, MAX_LABEL_WIDTH),
+    );
+  };
+
   const saveTask = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!editing) return;
@@ -400,6 +516,243 @@ export default function Home() {
     setNotice("备份文件已导出。");
   };
 
+  const exportLongImage = async () => {
+    try {
+      setNotice("正在生成完整长图…");
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      await document.fonts?.ready;
+
+      const imageGroups = TIERS.map((tier) => ({ tier, tasks: tasks.filter((task) => task.tier === tier) })).filter(
+        (group) => group.tasks.length,
+      );
+      const imageMonths = monthSegments(timelineStart, timelineEnd);
+      const pageMargin = 40;
+      const imageLabelWidth = Math.max(520, labelWidth + 180);
+      const trackWidth = Math.max(1100, imageMonths.length * 96);
+      const logicalWidth = pageMargin * 2 + imageLabelWidth + trackWidth;
+      const measureCanvas = document.createElement("canvas");
+      const measureContext = measureCanvas.getContext("2d");
+      if (!measureContext) throw new Error("canvas-unavailable");
+
+      const labelTextWidth = imageLabelWidth - 82;
+      const rowLayouts = new Map<string, { title: string[]; detail: string[]; height: number }>();
+      for (const task of tasks) {
+        measureContext.font = '700 26px "PingFang SC", "Microsoft YaHei", sans-serif';
+        const titleLines = wrapCanvasText(measureContext, task.title || "未命名任务", labelTextWidth);
+        measureContext.font = '400 20px "PingFang SC", "Microsoft YaHei", sans-serif';
+        const detailLines = wrapCanvasText(measureContext, task.detail, labelTextWidth);
+        const height = Math.max(132, 28 + titleLines.length * 34 + (detailLines.length ? 10 + detailLines.length * 28 : 0) + 48);
+        rowLayouts.set(task.id, { title: titleLines, detail: detailLines, height });
+      }
+
+      const heroHeight = 190;
+      const boardGap = 24;
+      const monthHeaderHeight = 82;
+      const groupHeaderHeight = 62;
+      const emptyHeight = tasks.length ? 0 : 130;
+      const rowsHeight = tasks.reduce((sum, task) => sum + (rowLayouts.get(task.id)?.height ?? 108), 0);
+      const boardHeight =
+        monthHeaderHeight + imageGroups.length * groupHeaderHeight + rowsHeight + emptyHeight + 54;
+      const logicalHeight = pageMargin + heroHeight + boardGap + boardHeight + pageMargin;
+      const maxDimension = 28000;
+      const maxPixels = 150_000_000;
+      const renderScale = Math.min(
+        1.5,
+        maxDimension / logicalWidth,
+        maxDimension / logicalHeight,
+        Math.sqrt(maxPixels / (logicalWidth * logicalHeight)),
+      );
+
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.floor(logicalWidth * renderScale));
+      canvas.height = Math.max(1, Math.floor(logicalHeight * renderScale));
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("canvas-unavailable");
+      context.scale(renderScale, renderScale);
+      context.textBaseline = "alphabetic";
+      context.fillStyle = "#f4f1ea";
+      context.fillRect(0, 0, logicalWidth, logicalHeight);
+
+      roundedCanvasRect(context, pageMargin, pageMargin, logicalWidth - pageMargin * 2, heroHeight, 24);
+      context.fillStyle = "#173a5c";
+      context.fill();
+      context.fillStyle = "rgba(255,255,255,.68)";
+      context.font = '700 12px "SFMono-Regular", Menlo, monospace';
+      context.fillText("ROADMAP STUDIO", pageMargin + 38, pageMargin + 34);
+      context.fillStyle = "#ffffff";
+      context.font = '700 50px "PingFang SC", "Microsoft YaHei", sans-serif';
+      context.fillText("Roadmap", pageMargin + 38, pageMargin + 102);
+      context.fillStyle = "#e9c978";
+      context.font = '700 18px "SFMono-Regular", Menlo, monospace';
+      context.fillText(
+        `${timelineStart.replaceAll("-", ".")} — ${timelineEnd.replaceAll("-", ".")}`,
+        pageMargin + 40,
+        pageMargin + 137,
+      );
+      context.fillStyle = "rgba(255,255,255,.78)";
+      context.font = '500 20px "PingFang SC", "Microsoft YaHei", sans-serif';
+      context.textAlign = "right";
+      context.fillText(
+        `${tasks.length} 个任务  ·  ${totalDays} 个累计计划天数  ·  ${diffDays(timelineStart, timelineEnd) + 1} 天时间跨度`,
+        logicalWidth - pageMargin - 38,
+        pageMargin + 102,
+      );
+      context.fillStyle = "rgba(255,255,255,.55)";
+      context.font = '400 16px "PingFang SC", "Microsoft YaHei", sans-serif';
+      context.fillText("完整路线图长图", logicalWidth - pageMargin - 38, pageMargin + 132);
+      context.textAlign = "left";
+
+      const boardX = pageMargin;
+      const boardY = pageMargin + heroHeight + boardGap;
+      const boardWidth = logicalWidth - pageMargin * 2;
+      roundedCanvasRect(context, boardX, boardY, boardWidth, boardHeight, 20);
+      context.fillStyle = "#fffdf9";
+      context.fill();
+      context.strokeStyle = "#dfe3e7";
+      context.lineWidth = 1;
+      context.stroke();
+
+      context.fillStyle = "#f7f7f4";
+      context.fillRect(boardX, boardY, boardWidth, monthHeaderHeight);
+      context.fillStyle = "#182235";
+      context.font = '700 20px "PingFang SC", "Microsoft YaHei", sans-serif';
+      context.fillText("任务", boardX + 32, boardY + 35);
+      context.fillStyle = "#7d8791";
+      context.font = '400 15px "PingFang SC", "Microsoft YaHei", sans-serif';
+      context.fillText("名称 · 备注 · 日期", boardX + 32, boardY + 57);
+
+      const timelineX = boardX + imageLabelWidth;
+      let monthX = timelineX;
+      context.textAlign = "center";
+      for (const month of imageMonths) {
+        const monthWidth = (month.width / 100) * trackWidth;
+        context.strokeStyle = "#dfe3e7";
+        context.beginPath();
+        context.moveTo(monthX, boardY);
+        context.lineTo(monthX, boardY + monthHeaderHeight);
+        context.stroke();
+        context.fillStyle = "#25354a";
+        context.font = '700 18px "PingFang SC", "Microsoft YaHei", sans-serif';
+        context.fillText(month.label, monthX + monthWidth / 2, boardY + 34);
+        if (month.year) {
+          context.fillStyle = "#7b8795";
+          context.font = '600 14px "SFMono-Regular", Menlo, monospace';
+          context.fillText(month.year, monthX + monthWidth / 2, boardY + 55);
+        }
+        monthX += monthWidth;
+      }
+      context.textAlign = "left";
+
+      let cursorY = boardY + monthHeaderHeight;
+      for (const group of imageGroups) {
+        context.fillStyle = "#eef2f4";
+        context.fillRect(boardX, cursorY, boardWidth, groupHeaderHeight);
+        context.fillStyle = "#718093";
+        context.font = '700 13px "SFMono-Regular", Menlo, monospace';
+        context.fillText(TIER_META[group.tier].eyebrow, boardX + 32, cursorY + 25);
+        context.fillStyle = "#182235";
+        context.font = '700 19px "PingFang SC", "Microsoft YaHei", sans-serif';
+        context.fillText(group.tier, boardX + 150, cursorY + 27);
+        context.fillStyle = "#718093";
+        context.font = '400 16px "PingFang SC", "Microsoft YaHei", sans-serif';
+        context.fillText(TIER_META[group.tier].description, boardX + 252, cursorY + 27);
+        cursorY += groupHeaderHeight;
+
+        for (const task of group.tasks) {
+          const layout = rowLayouts.get(task.id) ?? { title: [task.title], detail: [], height: 108 };
+          const rowTop = cursorY;
+          const rowBottom = rowTop + layout.height;
+          context.strokeStyle = "#ebe9e3";
+          context.beginPath();
+          context.moveTo(boardX, rowBottom);
+          context.lineTo(boardX + boardWidth, rowBottom);
+          context.stroke();
+
+          context.fillStyle = task.color;
+          context.beginPath();
+          context.arc(boardX + 36, rowTop + 34, 6, 0, Math.PI * 2);
+          context.fill();
+          let textY = rowTop + 34;
+          context.fillStyle = "#182235";
+          context.font = '700 26px "PingFang SC", "Microsoft YaHei", sans-serif';
+          for (const line of layout.title) {
+            context.fillText(line, boardX + 58, textY);
+            textY += 34;
+          }
+          if (layout.detail.length) {
+            textY += 3;
+            context.fillStyle = "#647084";
+            context.font = '400 20px "PingFang SC", "Microsoft YaHei", sans-serif';
+            for (const line of layout.detail) {
+              context.fillText(line, boardX + 58, textY);
+              textY += 28;
+            }
+          }
+          context.fillStyle = "#7d8791";
+          context.font = '500 17px "PingFang SC", "Microsoft YaHei", sans-serif';
+          context.fillText(`${formatDate(task.start)} — ${formatDate(task.end)}`, boardX + 58, rowBottom - 17);
+
+          let gridX = timelineX;
+          for (const month of imageMonths) {
+            const monthWidth = (month.width / 100) * trackWidth;
+            context.strokeStyle = "#ebe9e3";
+            context.beginPath();
+            context.moveTo(gridX, rowTop);
+            context.lineTo(gridX, rowBottom);
+            context.stroke();
+            gridX += monthWidth;
+          }
+
+          const total = diffDays(timelineStart, addDays(timelineEnd, 1));
+          const barX = timelineX + (diffDays(timelineStart, task.start) / total) * trackWidth;
+          const barWidth = Math.max(10, ((diffDays(task.start, task.end) + 1) / total) * trackWidth);
+          const barHeight = 54;
+          const barY = rowTop + (layout.height - barHeight) / 2;
+          roundedCanvasRect(context, barX, barY, barWidth, barHeight, 9);
+          context.fillStyle = task.color;
+          context.fill();
+          if (barWidth > 70) {
+            context.save();
+            context.beginPath();
+            context.rect(barX + 12, barY, Math.max(0, barWidth - 24), barHeight);
+            context.clip();
+            context.fillStyle = "#ffffff";
+            context.font = '700 18px "PingFang SC", "Microsoft YaHei", sans-serif';
+            context.fillText(fitCanvasText(context, task.title, barWidth - 24), barX + 12, barY + 27);
+            context.restore();
+          }
+          cursorY = rowBottom;
+        }
+      }
+
+      if (!tasks.length) {
+        context.fillStyle = "#647084";
+        context.font = '500 22px "PingFang SC", "Microsoft YaHei", sans-serif';
+        context.textAlign = "center";
+        context.fillText("当前 Roadmap 还没有任务", boardX + boardWidth / 2, cursorY + 72);
+        context.textAlign = "left";
+        cursorY += emptyHeight;
+      }
+
+      context.fillStyle = "#8a929d";
+      context.font = '400 15px "PingFang SC", "Microsoft YaHei", sans-serif';
+      context.fillText("Roadmap Studio · 图片根据时间跨度与任务内容自动展开", boardX + 32, boardY + boardHeight - 22);
+
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((value) => (value ? resolve(value) : reject(new Error("image-export-failed"))), "image/png");
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `roadmap-long-${new Date().toISOString().slice(0, 10)}.png`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice(`长图已导出（${canvas.width} × ${canvas.height}）。`);
+    } catch {
+      setNotice("长图生成失败，请缩短时间范围后重试。");
+    }
+  };
+
   const importTasks = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -408,10 +761,10 @@ export default function Home() {
       if (isRoadmapExport(parsed)) {
         setTimelineStart(parsed.range.start);
         setTimelineEnd(parsed.range.end);
-        setTasks(fitTasksToRange(parsed.tasks, parsed.range.start, parsed.range.end));
+        setTasks(migrateSampleColors(fitTasksToRange(parsed.tasks, parsed.range.start, parsed.range.end)));
         setNotice(`已导入时间范围和 ${parsed.tasks.length} 个任务。`);
       } else if (isTaskArray(parsed)) {
-        setTasks(fitTasksToRange(parsed, timelineStart, timelineEnd));
+        setTasks(migrateSampleColors(fitTasksToRange(parsed, timelineStart, timelineEnd)));
         setNotice(`已导入 ${parsed.length} 个任务。`);
       } else {
         throw new Error("invalid");
@@ -451,8 +804,7 @@ export default function Home() {
         <div className="hero-main">
           <div>
             <p className="hero-kicker">{timelineStart.replaceAll("-", ".")} — {timelineEnd.replaceAll("-", ".")}</p>
-            <h1>把目标，放进时间里。</h1>
-            <p className="hero-copy">拖动任务调整时间，拉伸两端改变周期。所有计划都保存在你的浏览器中。</p>
+            <h1>Roadmap</h1>
           </div>
           <button className="primary-button" onClick={() => setEditing(createBlankTask(timelineStart, timelineEnd))}>
             <span aria-hidden="true">＋</span> 添加任务
@@ -479,17 +831,32 @@ export default function Home() {
           <div className="utility-actions">
             <button className="range-button" onClick={() => setRangeDraft({ start: timelineStart, end: timelineEnd })}>设置时间范围</button>
             <button onClick={() => fileInput.current?.click()}>导入</button>
-            <button onClick={exportTasks}>导出</button>
+            <button onClick={exportTasks}>导出 JSON</button>
+            <button onClick={exportLongImage}>导出长图</button>
             <input ref={fileInput} type="file" accept="application/json" onChange={importTasks} hidden />
           </div>
         </div>
 
         <div className="timeline-scroll">
-          <div className="timeline-board" style={{ minWidth: `${boardMinWidth}px` }}>
+          <div className="timeline-board" style={boardStyle}>
             <div className="timeline-header timeline-grid">
               <div className="task-heading">
                 <span>任务</span>
-                <small>点击任务可编辑</small>
+                <small>点击编辑 · 拖动右侧分隔线调列宽</small>
+                <button
+                  type="button"
+                  className={`column-resizer ${columnResize ? "active" : ""}`}
+                  aria-label="调整任务名称列宽"
+                  aria-valuemin={MIN_LABEL_WIDTH}
+                  aria-valuemax={MAX_LABEL_WIDTH}
+                  aria-valuenow={Math.round(labelWidth)}
+                  title="拖动调整任务名称列宽；方向键可微调"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    setColumnResize({ startX: event.clientX, originalWidth: labelWidth });
+                  }}
+                  onKeyDown={resizeColumnByKeyboard}
+                />
               </div>
               <div className="month-track">
                 {months.map((month) => (
@@ -584,13 +951,17 @@ export default function Home() {
               </div>
               <label>
                 <span>优先层级</span>
-                <select value={editing.tier} onChange={(event) => setEditing({ ...editing, tier: event.target.value as Tier })}>
+                <select value={editing.tier} onChange={(event) => {
+                  const tier = event.target.value as Tier;
+                  setEditing({ ...editing, tier, color: TIER_DEFAULT_COLOR[tier] });
+                }}>
                   {TIERS.map((tier) => <option key={tier}>{tier}</option>)}
                 </select>
               </label>
               <fieldset className="color-field">
                 <legend>任务颜色</legend>
                 <div>{COLORS.map((color) => <button type="button" key={color} className={editing.color === color ? "selected" : ""} style={{ background: color }} aria-label={`选择颜色 ${color}`} onClick={() => setEditing({ ...editing, color })} />)}</div>
+                <p className="color-hint">切换层级时会自动使用默认色，也可以在这里重新选择。</p>
               </fieldset>
               <div className="modal-actions">
                 {tasks.some((task) => task.id === editing.id) && <button type="button" className="danger-button" onClick={() => { setDeleteTarget(editing); setEditing(null); }}>删除任务</button>}

@@ -23,7 +23,7 @@ test("server-renders the roadmap product", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>Roadmap Studio｜交互式计划时间表<\/title>/i);
-  assert.match(html, /把目标，放进时间里/);
+  assert.match(html, /<h1>Roadmap<\/h1>/);
   assert.match(html, /添加任务/);
   assert.match(html, /设置时间范围/);
   assert.match(html, /示例 · 核心目标/);
@@ -40,8 +40,13 @@ test("includes local persistence and editable timeline behavior", async () => {
   assert.match(page, /localStorage\.setItem/);
   assert.match(page, /RANGE_STORAGE_KEY/);
   assert.match(page, /fitTasksToRange/);
+  assert.match(page, /TIER_DEFAULT_COLOR/);
+  assert.match(page, /migrateSampleColors/);
+  assert.match(page, /LABEL_WIDTH_STORAGE_KEY/);
+  assert.match(page, /column-resizer/);
   assert.match(page, /onPointerDown/);
   assert.match(page, /exportTasks/);
+  assert.match(page, /exportLongImage/);
   assert.match(page, /importTasks/);
   assert.match(page, /确认删除/);
   assert.match(layout, /lang="zh-CN"/);

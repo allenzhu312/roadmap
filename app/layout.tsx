@@ -26,14 +26,14 @@ export async function generateMetadata(): Promise<Metadata> {
     description: "自由添加、调整和保存任务的可视化路线图。",
     openGraph: {
       title: "Roadmap Studio",
-      description: "把目标，放进时间里。",
+      description: "自由创建、调整和保存任务的交互式 Roadmap。",
       type: "website",
       images: [{ url: socialImage, width: 1735, height: 907, alt: "Roadmap Studio 交互式计划时间表" }],
     },
     twitter: {
       card: "summary_large_image",
       title: "Roadmap Studio",
-      description: "把目标，放进时间里。",
+      description: "自由创建、调整和保存任务的交互式 Roadmap。",
       images: [socialImage],
     },
   };
